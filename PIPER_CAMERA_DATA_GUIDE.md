@@ -133,8 +133,7 @@ python3 collect_data/collect_data.py \
   --master_arm_left_topic /master/joint_left \
   --master_arm_right_topic /master/joint_right \
   --puppet_arm_left_topic /puppet/joint_left \
-  --puppet_arm_right_topic /puppet/joint_right \
-  --use_depth_image True
+  --puppet_arm_right_topic /puppet/joint_right
 ```
 
 Output:
@@ -296,6 +295,6 @@ piper_demo_v2/
 └── videos/
 ```
 
-The conversion includes RGB video, joint position, velocity, effort, and action. Depth images are not converted.
+The recording and conversion include RGB video, joint position, velocity, effort, and action. Depth images are not recorded.
 
 Last updated: `2026-07-10 CST`.

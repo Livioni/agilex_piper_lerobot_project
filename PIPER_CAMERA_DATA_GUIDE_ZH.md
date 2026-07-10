@@ -133,8 +133,7 @@ python3 collect_data/collect_data.py \
   --master_arm_left_topic /master/joint_left \
   --master_arm_right_topic /master/joint_right \
   --puppet_arm_left_topic /puppet/joint_left \
-  --puppet_arm_right_topic /puppet/joint_right \
-  --use_depth_image True
+  --puppet_arm_right_topic /puppet/joint_right
 ```
 
 输出文件：
@@ -296,6 +295,6 @@ piper_demo_v2/
 └── videos/
 ```
 
-转换内容包括 RGB 视频、关节位置、速度、力矩和动作，不转换深度图像。
+采集和转换内容包括 RGB 视频、关节位置、速度、力矩和动作，不采集深度图像。
 
 最后更新：`2026-07-10 CST`。
