@@ -238,3 +238,97 @@ USB_PORTS["1-3:1.0"]="can_right:1000000"
 
 - Added `--control_rate`.
 - Replaced fixed 20-step replay interpolation with steps calculated from `control_rate / frame_rate`.
+
+## 8. LeRobot Dataset v2.0 conversion
+
+Installed and tested on `2026-07-10`.
+
+### Installed locations
+
+```text
+Conda environment: /home/agilex/miniconda3/envs/lerobot_v2
+LeRobot source:    /home/agilex/lerobot-v2
+Converted data:    /home/agilex/lerobot-v2-data
+HF cache:          /home/agilex/.cache/huggingface-lerobot-v2
+```
+
+The source is pinned to LeRobot commit `aca464ca`, which reports Dataset format `v2.0`. It uses a CPU-only PyTorch installation and does not modify the ROS environments.
+
+### Activate and verify
+
+```bash
+conda activate lerobot_v2
+python -c "from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION; print(CODEBASE_VERSION)"
+```
+
+Expected:
+
+```text
+v2.0
+```
+
+Return to the normal shell with:
+
+```bash
+conda deactivate
+```
+
+### Convert Piper HDF5 to LeRobot v2.0
+
+The working converter is:
+
+```text
+/home/agilex/lerobot-v2/convert_piper_hdf5.py
+```
+
+Run:
+
+```bash
+cd ~/lerobot-v2
+conda activate lerobot_v2
+
+python convert_piper_hdf5.py \
+  --input-dir /home/agilex/data/piper_demo \
+  --output-dir /home/agilex/lerobot-v2-data/agilex/piper_demo_v2 \
+  --repo-id agilex/piper_demo_v2 \
+  --fps 30 \
+  --task "Piper bimanual demonstration"
+```
+
+The converter includes RGB video, joint position, velocity, effort, and action. The historical v2.0 converter does not include the recorded depth images.
+
+Output:
+
+```text
+/home/agilex/lerobot-v2-data/agilex/piper_demo_v2/
+├── data/
+├── meta/
+└── videos/
+```
+
+The output directory must not already exist. Select a new output name for another conversion.
+
+### LeRobot source edits
+
+Files edited under `/home/agilex/lerobot-v2`:
+
+```text
+convert_piper_hdf5.py
+lerobot/common/datasets/push_dataset_to_hub/aloha_hdf5_format.py
+pyproject.toml
+```
+
+- `convert_piper_hdf5.py` uses the supported v2.0 flow: `create`, `add_frame`, `save_episode`, and `consolidate`.
+- `aloha_hdf5_format.py` reads the HDF5 `compress` attribute and recognizes `qvel`.
+- `pyproject.toml` pins the v2-compatible dataset/Hugging Face dependencies and replaces the unavailable legacy `pyav` package name with `av==13.1.0`.
+
+Edit these files only inside the `lerobot_v2` environment. After editing, check with:
+
+```bash
+cd ~/lerobot-v2
+conda activate lerobot_v2
+python -m py_compile convert_piper_hdf5.py
+git diff
+```
+
+Last updated: `2026-07-10 21:25 CST`.

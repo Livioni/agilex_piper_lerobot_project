@@ -238,3 +238,97 @@ USB_PORTS["1-3:1.0"]="can_right:1000000"
 
 - 增加 `--control_rate` 参数。
 - 将固定 20 步插值改为根据 `control_rate / frame_rate` 自动计算插值步数。
+
+## 8. LeRobot Dataset v2.0 转换
+
+安装和测试日期：`2026-07-10`。
+
+### 安装位置
+
+```text
+Conda 环境：      /home/agilex/miniconda3/envs/lerobot_v2
+LeRobot 源码：    /home/agilex/lerobot-v2
+转换后数据：      /home/agilex/lerobot-v2-data
+Hugging Face 缓存：/home/agilex/.cache/huggingface-lerobot-v2
+```
+
+源码固定在 LeRobot commit `aca464ca`，Dataset 格式为 `v2.0`。该环境使用 CPU-only PyTorch，不会修改 ROS 环境。
+
+### 激活和验证
+
+```bash
+conda activate lerobot_v2
+python -c "from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION; print(CODEBASE_VERSION)"
+```
+
+预期输出：
+
+```text
+v2.0
+```
+
+返回普通终端环境：
+
+```bash
+conda deactivate
+```
+
+### 将 Piper HDF5 转换为 LeRobot v2.0
+
+可用的转换程序：
+
+```text
+/home/agilex/lerobot-v2/convert_piper_hdf5.py
+```
+
+执行：
+
+```bash
+cd ~/lerobot-v2
+conda activate lerobot_v2
+
+python convert_piper_hdf5.py \
+  --input-dir /home/agilex/data/piper_demo \
+  --output-dir /home/agilex/lerobot-v2-data/agilex/piper_demo_v2 \
+  --repo-id agilex/piper_demo_v2 \
+  --fps 30 \
+  --task "Piper bimanual demonstration"
+```
+
+转换内容包括 RGB 视频、关节位置、速度、力矩和动作。历史 v2.0 转换程序不包含已记录的深度图像。
+
+输出目录：
+
+```text
+/home/agilex/lerobot-v2-data/agilex/piper_demo_v2/
+├── data/
+├── meta/
+└── videos/
+```
+
+输出目录不能已存在。再次转换时应使用新的输出名称。
+
+### LeRobot 源码修改
+
+`/home/agilex/lerobot-v2` 下修改的文件：
+
+```text
+convert_piper_hdf5.py
+lerobot/common/datasets/push_dataset_to_hub/aloha_hdf5_format.py
+pyproject.toml
+```
+
+- `convert_piper_hdf5.py` 使用 v2.0 支持的流程：`create`、`add_frame`、`save_episode` 和 `consolidate`。
+- `aloha_hdf5_format.py` 根据 HDF5 的 `compress` 属性读取图像，并识别 `qvel`。
+- `pyproject.toml` 固定 v2 兼容的 dataset/Hugging Face 依赖，并将已不可用的旧 `pyav` 包名替换为 `av==13.1.0`。
+
+只在 `lerobot_v2` 环境中编辑这些文件。编辑后检查：
+
+```bash
+cd ~/lerobot-v2
+conda activate lerobot_v2
+python -m py_compile convert_piper_hdf5.py
+git diff
+```
+
+最后更新：`2026-07-10 21:25 CST`。
