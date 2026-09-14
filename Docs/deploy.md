@@ -1,8 +1,99 @@
-## 1. Camera
+# 部署模型
+
+## 前置知识： 同步推理和异步推理 (以下只是简短的介绍请自行查找其他资料)
+
+本项目的策略（STAR-VLA 等 **VL/VLA**——视觉-语言(-动作) 模型）部署在 **server–client** 架构上（`server_policy.py` 即 PolicyServer，`dual_piper_deploy_*.py` 即 RobotClient）。要理解为什么有两种推理模式，先得理解现代策略普遍输出的「动作块」。
+
+### Action Chunk（动作块 / 动作分块）
+
+传统行为克隆（BC）每步只预测一个动作 $a_t$。而现代策略 $\pi$ 把当前观测 $o_t$ 一次性映射为一段未来 $H$ 步的动作序列：
+
+$$\mathbf{A}_t = (a_t,\ a_{t+1},\ \dots,\ a_{t+H-1}) = \pi(o_t)$$
+
+这段 $\mathbf{A}_t$ 就是一个 **action chunk**。机器人执行其中一部分后，再以最新观测重新查询一段重叠的新 chunk（**receding horizon / 滚动时域**），多段重叠部分常用 **temporal ensembling（时序集成）**——按指数权重 $\exp(-\Delta t/\tau)$ 融合——做平滑切换。**ACT、Diffusion Policy、OpenVLA、π0、SmolVLA、STAR-VLA** 等当前主流模型都输出 action chunk（可在 [LeRobot](https://github.com/huggingface/lerobot) 中跑通验证）。
+
+为什么用 chunk 而非单步：
+
+- **抑制误差累积（compounding error）**：单步 BC 每步误差会让机器人漂移到训练分布外的状态，下一步预测更差、雪崩式放大。一次预测 $k$ 步把独立决策点从 $T$ 降到 $T/k$（200 步轨迹、$k{=}100$ 时仅需 2~4 次决策）。
+- **时序一致性 / 平滑性**：整段联合预测、联合计算 loss，迫使网络学到平滑的运动基元，而非帧间各自正确但互相矛盾的动作（类比语言模型一次生成多 token 比逐 token 采样更连贯）。
+- **降低推理频率需求**：一次前向管多步，缓解大模型推理慢的瓶颈。
+
+**chunk size $k$ 是最关键超参**，本质是「平滑 vs 响应」的权衡：
+
+| 任务类型 | 推荐 $k$（50Hz 下≈秒数） | 说明 |
+| --- | --- | --- |
+| 桌面抓放（环境静态） | 50–100（1–2s） | 平滑性比响应更重要 |
+| 装配 / 插装（接触丰富） | 30–60 | 需更频繁重规划以修正对齐 |
+| 双臂协调 | 50–80 | 太短会破坏双臂协调 |
+| 动态任务（抓/躲） | 10–20 | 响应优先，接受平滑损失 |
+
+> $k$ 越大越平滑但越接近开环（环境变了也得等当前 chunk 执行完）；$k$ 越小响应越快，但重引入累积误差并失去平滑优势。
+
+### 同步推理（Synchronous / Sequential Inference）
+
+「算一步、走一步」的**阻塞式请求-响应**。控制循环为：
+
+1. 采集观测 $o_t$；
+2. 跑 $\pi(o_t)$ 得到 $\mathbf{A}_t$；
+3. 把 $\mathbf{A}_t$ 入队、开始从队列取动作执行；
+4. 队列空了就**等**下一个 chunk，否则重复步骤 3。
+
+**核心问题：步骤 2 推理期间机器人空转（idle）。** 模型越大推理越慢，空转时间会主导单步交互时间（约 $1/\text{fps}$）。直接后果是：
+
+- **任务完成变慢**——必须等下一个 chunk 算完才能继续；
+- **响应性差**——有动作时几乎开环执行、没动作时彻底停转，失败后无法及时重规划。
+
+
+### 异步推理（Asynchronous Inference）
+
+核心思想：**把「动作预测」与「动作执行」解耦（decouple）**，分别跑在两个进程 / 两台机器上，让计算与执行在时间上重叠。
+
+- **PolicyServer**：跑在加速硬件（GPU）上做批量推理，把 action chunk 发回去；
+- **RobotClient**：机载运行，维护一个**动作队列（action queue）**，一边流式上传最新观测、一边执行队列里的动作；
+- 新 chunk 到达后，与队列剩余部分在**重叠段聚合**：可「直接替换（replace）」或「加权融合（weighted blend）」，由自定义 `aggregate_fn` 控制。
+
+流程：Client 持续流式发观测 → Server 推理时 Client 执行**当前队列** → 新 chunk 到达并入队 → 循环往复。结果是机器人**永远不等推理**、控制环更紧，实测约 **2× 任务完成加速**、成功率相当，且失败后能即时重规划。
+
+**触发阈值 $g$**：队列长度降到 $g\cdot H$（代码里即 `chunk_size_threshold`）以下才发新观测——
+
+- $g=0$：队列空才发，**退化为同步**；
+- $g=1$：每步都发，算力拉满、延迟最小；
+- 实验推荐 $g\approx 0.5\sim 0.7$。
+
+**两个时间尺度**与比值 $c$：
+
+$$c = \frac{\text{environment\_dt}}{\text{inference\_time}} = \frac{1/\text{fps}}{\text{前向 + 网络往返}}$$
+
+- $c \ll 1$：环境演化比推理快，队列很快被掏空，**退化为同步**；
+- $c \ge 1$：server 跟得上，队列几乎总是满的。
+
+应对 $c \ll 1$ 的两条路：(1) 给 PolicyServer 上更多算力（GPU）压低 `inference_time`；(2) 提高 $g$ 更频繁地发观测。LeRobot 原生支持 async（gRPC 通信，比 REST 快约 5×，本地网可达 <100ms 往返），详见 [LeRobot async 文档](https://huggingface.co/docs/lerobot/en/async) 与 [异步推理博客](https://huggingface.co/blog/async-robot-inference)。
+
+
+## 模型部署
+下面的代码均在Agilex-aloha 真机上运行：
+
+### 1. Camera
 
 连接服务器，运行
 
-```cmd
+```bash
+zellij attach workspace
+```
+
+> **Zellij** 是一个用 Rust 编写的终端复用器（terminal multiplexer，类似 tmux / screen）：可在单个终端里管理多个窗格（pane）/标签页（tab）/窗口，会话在断开后仍然存活，可用 `zellij attach` 重新接入。上面的 `zellij attach workspace` 即重新接入名为 `workspace` 的已有会话，其中已预先排布好 camera / ros 等窗格。
+
+!!! 请注意 退出zellij 请使用CTRL+O 然后按D !!!
+
+!!! 请注意 退出zellij 请使用CTRL+O 然后按D !!!
+
+!!! 请注意 退出zellij 请使用CTRL+O 然后按D !!!
+
+![zellij 窗格布局](../assets/images/zellij.png)
+
+连接服务器，运行
+
+```bash
 zellij attach workspace
 ```
 打开 ros 窗口，左侧运行
@@ -23,7 +114,7 @@ roslaunch astra_camera multi_camera.launch
 ```bash
 launch_camera
 ```
-## 2. ROS
+### 2. ROS
 
 与 任务一 同一个 zellij，打开 ros 窗口
 
@@ -45,11 +136,12 @@ roslaunch piper start_ms_piper.launch mode:=0 auto_enable:=false
 ```bash
 roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
 ```
-## 3. 部署
+### 3. 部署
 
 部署需要联通 server(policy) 与 client(robot)
 
-### sever 端
+
+#### sever 端
 
 ```bash
 zellij attach starvla
@@ -64,11 +156,11 @@ python deployment/model_server/server_policy.py \
 
 
 
-### client 端
+#### client 端
 
 调整
 
-```
+``` bash
 /home/agilex/Documents/phs/github/RTC-Anything/configs 
 ```
 
@@ -76,15 +168,15 @@ python deployment/model_server/server_policy.py \
 
 client 文件位置: 
 
-```
+```bash
 /home/agilex/Documents/phs/github/RTC-Anything/src
 ```
 
  使用时用 codex 根据 
  
- ```
+```bash
  /home/agilex/Documents/phs/github/RTC-Anything/src/dual_piper_deploy.py
- ```
+```
  
  的格式写一份针对当前模型的 client，调整端口一致
 
@@ -110,70 +202,4 @@ client 文件位置:
 zellij attach rtc
 
 uv run src/dual_piper_deploy_<your_model>.py --config configs/your/path.yaml --port 8000
-```
-
-## 4. 数据采集
-
-可参考 
-
-```
-/home/agilex/cobot_magic/reset_pose/README.md
-```
-
-1, 2 步执行后，打开：
-
-```
-zellij attach workspace
-```
-
-中的 collect_data, 执行：
-
-```bash
-python3 collect_data/collect_data.py \
-  --dataset_dir ~/data/demo_task_name \
-  --task_name <task_name> \
-  --episode_idx 0 \
-  --max_timesteps 300 \
-  --frame_rate 30
-```
-
-数据采集后，将 hdf5 文件转换为 lerobot 格式，减小硬盘空间占用
-
-```bash
-python collect_data/convert_piper_hdf5.py \
-    --input-dir /home/agilex/data/<exp7_drop_bin>(exp num_task_name)  \
-    --output-dir /home/agilex/data/drop_bin_lerobot \
-    --image-size original
-```
-
-## 带深度的数据采集
-
-### 采集
-
-```bash
-cd /home/agilex/cobot_magic
-
-python3 collect_data/collect_data.py \
-  --dataset_dir /home/agilex/data/demo_depth \
-  --task_name drop_bin \
-  --episode_idx 0 \
-  --max_timesteps 300 \
-  --frame_rate 30 \
-  --use_depth_image True
-```
-
-### 转换
-
-使用一个新的 py 文件
-
-```bash
-/home/agilex/miniconda3/envs/lerobot/bin/python \
-  /home/agilex/cobot_magic/collect_data/convert_piper_hdf5_depth.py \
-  --input-dir /home/agilex/data/demo_depth/drop_bin \
-  --output-dir /home/agilex/data/demo_depth/drop_bin_lerobot_depth \
-  --repo-id agilex/drop_bin_depth \
-  --task "Throw the batteries into the trash bin." \
-  --fps 30 \
-  --image-size original \
-  --depth-unit mm
 ```

@@ -108,7 +108,7 @@ https://github.com/Livioni/Lerobot_Datasets
 
 连接服务器，运行
 
-```cmd
+```bash
 zellij attach workspace
 ```
 
