@@ -54,21 +54,10 @@ $$\mathbf{A}_t = (a_t,\ a_{t+1},\ \dots,\ a_{t+H-1}) = \pi(o_t)$$
 
 流程：Client 持续流式发观测 → Server 推理时 Client 执行**当前队列** → 新 chunk 到达并入队 → 循环往复。结果是机器人**永远不等推理**、控制环更紧，实测约 **2× 任务完成加速**、成功率相当，且失败后能即时重规划。
 
-**触发阈值 $g$**：队列长度降到 $g\cdot H$（代码里即 `chunk_size_threshold`）以下才发新观测——
 
-- $g=0$：队列空才发，**退化为同步**；
-- $g=1$：每步都发，算力拉满、延迟最小；
-- 实验推荐 $g\approx 0.5\sim 0.7$。
+## RTC-Anything (异步推理Client)
 
-**两个时间尺度**与比值 $c$：
-
-$$c = \frac{\text{environment\_dt}}{\text{inference\_time}} = \frac{1/\text{fps}}{\text{前向 + 网络往返}}$$
-
-- $c \ll 1$：环境演化比推理快，队列很快被掏空，**退化为同步**；
-- $c \ge 1$：server 跟得上，队列几乎总是满的。
-
-应对 $c \ll 1$ 的两条路：(1) 给 PolicyServer 上更多算力（GPU）压低 `inference_time`；(2) 提高 $g$ 更频繁地发观测。LeRobot 原生支持 async（gRPC 通信，比 REST 快约 5×，本地网可达 <100ms 往返），详见 [LeRobot async 文档](https://huggingface.co/docs/lerobot/en/async) 与 [异步推理博客](https://huggingface.co/blog/async-robot-inference)。
-
+参考链接： https://github.com/Livioni/RTC-Anything
 
 ## 模型部署
 下面的代码均在Agilex-aloha 真机上运行：
